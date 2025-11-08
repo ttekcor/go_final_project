@@ -20,6 +20,10 @@ func NewServer() *http.Server {
 
 	r := chi.NewRouter()
 	r.Get("/", handlers.HandlerHTML)
+
+	// Раздача статических файлов из каталога ./web
+	staticFs := http.StripPrefix("/", http.FileServer(http.Dir("./web")))
+	r.Handle("/*", staticFs)
 	
 
 	server := &http.Server{

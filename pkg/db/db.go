@@ -54,3 +54,8 @@ func Init(dbFile string) error {
 	}
 	return nil
 }
+
+// Handle возвращает активный дескриптор БД.
+func Handle() *sql.DB {
+	return db
+}

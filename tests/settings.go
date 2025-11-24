@@ -11,10 +11,10 @@ var Port = func() int {
 			return p
 		}
 	}
-	return 7540
+	return 7541
 }()
 
 var DBFile = "../scheduler.db"
-var FullNextDate = false
-var Search = false
+var FullNextDate = true
+var Search = true
 var Token = ``

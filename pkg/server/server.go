@@ -34,7 +34,7 @@ func NewServer() *http.Server {
 
 	port := os.Getenv("TODO_PORT")
 	if port == "" {
-		port = "7540"
+		port = "7541"
 	}
 
 	server := &http.Server{

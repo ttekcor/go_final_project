@@ -20,10 +20,10 @@ COPY --from=builder /out/app /app/app
 COPY web/ /app/web/
 
 # Значения по умолчанию (можно переопределить при запуске контейнера)
-ENV TODO_PORT=7541
+ENV TODO_PORT=7540
 
 # Порт HTTP-сервера
-EXPOSE 7541
+EXPOSE ${TODO_PORT}
 
 # По умолчанию сервер ищет SQLite-файл scheduler.db в /app
 # Рекомендуется примонтировать файл БД с хоста в /app/scheduler.db

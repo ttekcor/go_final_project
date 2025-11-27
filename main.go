@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"main/pkg/config"
 	"main/pkg/db"
 	"main/pkg/server"
 	"net/http"
@@ -17,10 +18,18 @@ func main() {
 	logger := log.New(log.Writer(), "MAIN: ", log.LstdFlags)
 	// Загружаем переменные окружения из файлов, если есть
 	_ = godotenv.Load("tests/.env", "tests\\.env", ".env")
-	if err := db.Init("scheduler.db"); err != nil {
+
+	// Инициализируем конфигурацию
+	cfg := config.Init()
+
+	database, err := db.Init("scheduler.db")
+	if err != nil {
 		logger.Fatal("Ошибка инициализации БД: ", err)
 	}
-	srv := server.NewServer()
+	defer database.Close()
+
+	taskStore := db.NewTaskStore(database)
+	srv := server.NewServer(cfg, taskStore)
 	logger.Printf("Сервер запускается на порту %s...", srv.Addr)
 
 	go func() {

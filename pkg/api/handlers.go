@@ -9,11 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"main/pkg/api/interfaces"
+	"main/pkg/config"
+	"main/pkg/db"
 	"main/pkg/scheduler"
 	"main/pkg/service"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+const dateFormat = "20060102"
 
 func HandlerHTML(w http.ResponseWriter, r *http.Request) {
 	content, err := os.ReadFile("web/index.html")
@@ -22,7 +27,10 @@ func HandlerHTML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(content)
+	if _, err := w.Write(content); err != nil {
+		http.Error(w, "Ошибка записи файла", http.StatusInternalServerError)
+		return
+	}
 }
 
 // writeJSON — утилита для JSON-ответов
@@ -32,8 +40,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func writeError(w http.ResponseWriter, msg string) {
-	writeJSON(w, http.StatusOK, map[string]any{"error": msg})
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, interfaces.ErrorResponse{Error: msg})
 }
 
 // HandlerNextDate GET /api/nextdate?now=YYYYMMDD&date=YYYYMMDD&repeat=...
@@ -48,34 +56,32 @@ func HandlerNextDate(w http.ResponseWriter, r *http.Request) {
 	if nowStr == "" {
 		now = time.Now()
 	} else {
-		now, err = time.Parse("20060102", nowStr)
+		now, err = time.Parse(dateFormat, nowStr)
 		if err != nil {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("now: некорректная дата"))
+			writeError(w, http.StatusBadRequest, "now: некорректная дата")
 			return
 		}
 	}
 	next, err := scheduler.NextDate(now, dstart, repeat)
 	if err != nil {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(err.Error()))
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(next))
 }
 
-func Auth(next http.HandlerFunc) http.HandlerFunc {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // смотрим наличие пароля
-        pass := os.Getenv("TODO_PASSWORD")
-        if len(pass) > 0 {
+func Auth(next http.HandlerFunc, cfg *config.Config) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// смотрим наличие пароля
+		pass := cfg.Password
+		if len(pass) > 0 {
 			var jwtToken string // JWT-токен из куки
-            // получаем куку
-            cookie, err := r.Cookie("token")
-            if err == nil {
+			// получаем куку
+			cookie, err := r.Cookie("token")
+			if err == nil {
 				jwtToken = cookie.Value
-            }
+			}
 			var valid bool = false
 			if strings.TrimSpace(jwtToken) != "" {
 				claims := &jwt.RegisteredClaims{}
@@ -98,61 +104,60 @@ func Auth(next http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 
-            if !valid {
-                // возвращаем ошибку авторизации 401
-                http.Error(w, "Authentification required", http.StatusUnauthorized)
-                return
-            }
-        }
-        next(w, r)
-    })
+			if !valid {
+				// возвращаем ошибку авторизации 401
+				http.Error(w, "Authentification required", http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	})
 }
 
 // HandlerSignIn POST /signin
 // Тело: {"password": "..."}
 // При успешной аутентификации устанавливает HttpOnly-куку token с JWT.
-func HandlerSignIn(w http.ResponseWriter, r *http.Request) {
-	type signInRequest struct {
-		Password string `json:"password"`
+func HandlerSignIn(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in interfaces.SignInRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "невалидный JSON")
+			return
+		}
+		secret := cfg.Password
+		// Если секрет не задан или пароль пуст — считаем попытку неуспешной
+		if secret == "" || strings.TrimSpace(in.Password) == "" {
+			writeError(w, http.StatusUnauthorized, "Неверный пароль")
+			return
+		}
+		if !subtleConstantTimeCompare(in.Password, secret) {
+			writeError(w, http.StatusUnauthorized, "Неверный пароль")
+			return
+		}
+		// Генерируем JWT с истечением через 8 часов
+		expiresAt := time.Now().Add(8 * time.Hour)
+		claims := jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		jwtStr, err := token.SignedString([]byte(secret))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Ошибка генерации токена")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "token",
+			Value:    jwtStr,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   false,
+			Expires:  expiresAt,
+		})
+		writeJSON(w, http.StatusOK, interfaces.SignInResponse{Token: jwtStr})
 	}
-	var in signInRequest
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, "невалидный JSON")
-		return
-	}
-	secret := strings.TrimSpace(os.Getenv("TODO_PASSWORD"))
-	// Если секрет не задан или пароль пуст — считаем попытку неуспешной
-	if secret == "" || strings.TrimSpace(in.Password) == "" {
-		writeError(w, "Неверный пароль")
-		return
-	}
-	if !subtleConstantTimeCompare(in.Password, secret) {
-		writeError(w, "Неверный пароль")
-		return
-	}
-	// Генерируем JWT с истечением через 30 дней
-	expiresAt := time.Now().Add(8 * time.Hour)
-	claims := jwt.RegisteredClaims{
-		ExpiresAt: jwt.NewNumericDate(expiresAt),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
-		NotBefore: jwt.NewNumericDate(time.Now()),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	jwtStr, err := token.SignedString([]byte(secret))
-	if err != nil {
-		writeError(w, "Неверный пароль")
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "token",
-		Value:    jwtStr,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
-		Expires:  expiresAt,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"token": jwtStr})
 }
 
 // сравнение без утечек времени
@@ -166,157 +171,149 @@ func subtleConstantTimeCompare(a, b string) bool {
 	}
 	return res == 0
 }
+
 // HandlerTasks GET /api/tasks
-func HandlerTasks(w http.ResponseWriter, r *http.Request) {
-	search := strings.TrimSpace(r.URL.Query().Get("search"))
-	list, err := service.GetTasks(search, 50)
-	if err != nil {
-		writeError(w, err.Error())
-		return
+func HandlerTasks(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		search := strings.TrimSpace(r.URL.Query().Get("search"))
+		list, err := taskService.GetTasks(search, db.DefaultTaskLimit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Преобразуем к TaskResponse для совместимости с тестами
+		tasks := make([]interfaces.TaskResponse, 0, len(list))
+		for _, t := range list {
+			tasks = append(tasks, interfaces.TaskResponse{
+				ID:      strconv.FormatInt(t.ID, 10),
+				Date:    t.Date,
+				Title:   t.Title,
+				Comment: t.Comment,
+				Repeat:  t.Repeat,
+			})
+		}
+		writeJSON(w, http.StatusOK, interfaces.TasksResponse{Tasks: tasks})
 	}
-	// Преобразуем к []map[string]string для совместимости с тестами
-	tasks := make([]map[string]string, 0, len(list))
-	for _, t := range list {
-		tasks = append(tasks, map[string]string{
-			"id":      strconv.FormatInt(t.ID, 10),
-			"date":    t.Date,
-			"title":   t.Title,
-			"comment": t.Comment,
-			"repeat":  t.Repeat,
-		})
-	}
-	if tasks == nil {
-		tasks = []map[string]string{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
 }
 
 // HandlerGetTask GET /api/task?id=...
-func HandlerGetTask(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	if strings.TrimSpace(idStr) == "" {
-		writeError(w, "id: обязателен")
-		return
+func HandlerGetTask(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.URL.Query().Get("id")
+		if strings.TrimSpace(idStr) == "" {
+			writeError(w, http.StatusBadRequest, "id: обязателен")
+			return
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "id: неверный формат")
+			return
+		}
+		t, err := taskService.GetTask(id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, interfaces.TaskResponse{
+			ID:      strconv.FormatInt(t.ID, 10),
+			Date:    t.Date,
+			Title:   t.Title,
+			Comment: t.Comment,
+			Repeat:  t.Repeat,
+		})
 	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		writeError(w, "id: неверный формат")
-		return
-	}
-	t, err := service.GetTask(id)
-	if err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"id":      strconv.FormatInt(t.ID, 10),
-		"date":    t.Date,
-		"title":   t.Title,
-		"comment": t.Comment,
-		"repeat":  t.Repeat,
-	})
 }
 
 // HandlerAddTask POST /api/task
-func HandlerAddTask(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Date    string `json:"date"`
-		Title   string `json:"title"`
-		Comment string `json:"comment"`
-		Repeat  string `json:"repeat"`
+func HandlerAddTask(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in interfaces.AddTaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "невалидный JSON")
+			return
+		}
+		id, err := taskService.AddTask(time.Now(),
+			strings.TrimSpace(in.Date),
+			strings.TrimSpace(in.Title),
+			strings.TrimSpace(in.Comment),
+			strings.TrimSpace(in.Repeat))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, interfaces.AddTaskResponse{ID: id})
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, "невалидный JSON")
-		return
-	}
-	id, err := service.AddTask(time.Now(),
-		strings.TrimSpace(in.Date),
-		strings.TrimSpace(in.Title),
-		strings.TrimSpace(in.Comment),
-		strings.TrimSpace(in.Repeat))
-	if err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
 // HandlerEditTask PUT /api/task
-func HandlerEditTask(w http.ResponseWriter, r *http.Request) {
-	var in map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, "невалидный JSON")
-		return
+func HandlerEditTask(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in interfaces.EditTaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "невалидный JSON")
+			return
+		}
+		idStr := strings.TrimSpace(in.ID)
+		if idStr == "" {
+			writeError(w, http.StatusBadRequest, "id: обязателен")
+			return
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "id: неверный формат")
+			return
+		}
+		err = taskService.UpdateTask(time.Now(), id,
+			strings.TrimSpace(in.Date),
+			strings.TrimSpace(in.Title),
+			strings.TrimSpace(in.Comment),
+			strings.TrimSpace(in.Repeat))
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, interfaces.EmptyResponse{})
 	}
-	idStr := strings.TrimSpace(fmtAny(in["id"]))
-	if idStr == "" {
-		writeError(w, "id: обязателен")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		writeError(w, "id: неверный формат")
-		return
-	}
-	err = service.UpdateTask(time.Now(), id,
-		strings.TrimSpace(fmtAny(in["date"])),
-		strings.TrimSpace(fmtAny(in["title"])),
-		strings.TrimSpace(fmtAny(in["comment"])),
-		strings.TrimSpace(fmtAny(in["repeat"])))
-	if err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 // HandlerDeleteTask DELETE /api/task?id=...
-func HandlerDeleteTask(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	if strings.TrimSpace(idStr) == "" {
-		writeError(w, "id: обязателен")
-		return
+func HandlerDeleteTask(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.URL.Query().Get("id")
+		if strings.TrimSpace(idStr) == "" {
+			writeError(w, http.StatusBadRequest, "id: обязателен")
+			return
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "id: неверный формат")
+			return
+		}
+		if err := taskService.DeleteTask(id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, interfaces.EmptyResponse{})
 	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		writeError(w, "id: неверный формат")
-		return
-	}
-	if err := service.DeleteTask(id); err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 // HandlerDone POST /api/task/done?id=...
-func HandlerDone(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	if strings.TrimSpace(idStr) == "" {
-		writeError(w, "id: обязателен")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		writeError(w, "id: неверный формат")
-		return
-	}
-	if err := service.DoneTask(id); err != nil {
-		writeError(w, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{})
-}
-
-func fmtAny(v any) string {
-	if v == nil {
-		return ""
-	}
-	switch t := v.(type) {
-	case string:
-		return t
-	default:
-		b, _ := json.Marshal(v)
-		return string(b)[1:len(string(b))-1]
+func HandlerDone(taskService *service.TaskService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.URL.Query().Get("id")
+		if strings.TrimSpace(idStr) == "" {
+			writeError(w, http.StatusBadRequest, "id: обязателен")
+			return
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "id: неверный формат")
+			return
+		}
+		if err := taskService.DoneTask(id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, interfaces.EmptyResponse{})
 	}
 }

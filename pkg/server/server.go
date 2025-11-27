@@ -3,14 +3,17 @@ package server
 import (
 	"log"
 	"main/pkg/api"
+	"main/pkg/config"
+	"main/pkg/db"
+	"main/pkg/service"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 )
 
-func NewServer() *http.Server {
+func NewServer(cfg *config.Config, taskStore *db.TaskStore) *http.Server {
+	taskService := service.NewTaskService(taskStore)
 	logger := log.New(log.Writer(), "SERVER: ", log.LstdFlags)
 
 	r := chi.NewRouter()
@@ -19,26 +22,24 @@ func NewServer() *http.Server {
 	// API
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/nextdate", api.HandlerNextDate)
-		r.Get("/tasks", api.HandlerTasks)
-		r.Get("/task", api.HandlerGetTask)
-		r.Post("/task", api.HandlerAddTask)
-		r.Put("/task", api.Auth(api.HandlerEditTask))
-		r.Delete("/task", api.Auth(api.HandlerDeleteTask))
-		r.Post("/task/done", api.Auth(api.HandlerDone))
-		r.Post("/signin", api.HandlerSignIn)
+		r.Get("/tasks", api.HandlerTasks(taskService))
+		r.Get("/task", api.HandlerGetTask(taskService))
+		r.Post("/task", api.HandlerAddTask(taskService))
+		r.Put("/task", api.Auth(api.HandlerEditTask(taskService), cfg))
+		r.Delete("/task", api.Auth(api.HandlerDeleteTask(taskService), cfg))
+		r.Post("/task/done", api.Auth(api.HandlerDone(taskService), cfg))
+		r.Post("/signin", api.HandlerSignIn(cfg))
 	})
 
 	// Раздача статических файлов из каталога ./web
-	staticFs := http.StripPrefix("/", http.FileServer(http.Dir("./web")))
+	staticFs := http.FileServer(http.Dir("./web"))
+	r.Handle("/js/*", http.StripPrefix("/js/", http.FileServer(http.Dir("./web/js"))))
+	r.Handle("/css/*", http.StripPrefix("/css/", http.FileServer(http.Dir("./web/css"))))
+	r.Handle("/favicon.ico", staticFs)
 	r.Handle("/*", staticFs)
 
-	port := os.Getenv("TODO_PORT")
-	if port == "" {
-		port = "7541"
-	}
-
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      r,
 		ErrorLog:     logger,
 		ReadTimeout:  5 * time.Second,
@@ -48,4 +49,3 @@ func NewServer() *http.Server {
 
 	return server
 }
-

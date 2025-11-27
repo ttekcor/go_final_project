@@ -10,9 +10,6 @@ import (
 
 const DefaultDBFile = "scheduler.db"
 
-// глобальный дескриптор БД
-var db *sql.DB
-
 // SQL схема для первичной установки
 const schema = `
 CREATE TABLE IF NOT EXISTS scheduler (
@@ -26,7 +23,8 @@ CREATE INDEX IF NOT EXISTS idx_scheduler_date ON scheduler(date);
 `
 
 // Init открывает БД с помощью database/sql и при необходимости создаёт таблицу/индекс
-func Init(dbFile string) error {
+// Возвращает *sql.DB для использования через dependency injection
+func Init(dbFile string) (*sql.DB, error) {
 	if dbFile == "" {
 		dbFile = DefaultDBFile
 	}
@@ -36,26 +34,20 @@ func Init(dbFile string) error {
 
 	handle, err := sql.Open("sqlite", dbFile)
 	if err != nil {
-		return fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
 	// Проверяем соединение
 	if err := handle.Ping(); err != nil {
 		_ = handle.Close()
-		return fmt.Errorf("ping sqlite: %w", err)
+		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-
-	db = handle
 
 	if install {
-		if _, err := db.Exec(schema); err != nil {
-			return fmt.Errorf("install schema: %w", err)
+		if _, err := handle.Exec(schema); err != nil {
+			_ = handle.Close()
+			return nil, fmt.Errorf("install schema: %w", err)
 		}
 	}
-	return nil
-}
-
-// Handle возвращает активный дескриптор БД.
-func Handle() *sql.DB {
-	return db
+	return handle, nil
 }

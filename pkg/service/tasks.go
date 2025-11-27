@@ -10,6 +10,8 @@ import (
 	"main/pkg/scheduler"
 )
 
+const dateFormat = "20060102"
+
 var (
 	ErrNotFound      = errors.New("задача не найдена")
 	ErrTitleRequired = errors.New("title: обязателен")
@@ -17,17 +19,27 @@ var (
 	ErrBadRepeat     = errors.New("repeat: неверный формат")
 )
 
+// TaskService предоставляет бизнес-логику для работы с задачами
+type TaskService struct {
+	store *db.TaskStore
+}
+
+// NewTaskService создает новый экземпляр TaskService
+func NewTaskService(store *db.TaskStore) *TaskService {
+	return &TaskService{store: store}
+}
+
 // GetTasks возвращает список задач с учётом поиска и лимита.
-func GetTasks(search string, limit int) ([]*db.Task, error) {
+func (s *TaskService) GetTasks(search string, limit int) ([]*db.Task, error) {
 	if search == "" {
-		return db.Tasks(limit)
+		return s.store.Tasks(limit)
 	}
-	return db.TasksSearch(limit, search)
+	return s.store.TasksSearch(limit, search)
 }
 
 // GetTask возвращает задачу по id.
-func GetTask(id int64) (*db.Task, error) {
-	t, err := db.GetTask(id)
+func (s *TaskService) GetTask(id int64) (*db.Task, error) {
+	t, err := s.store.GetTask(id)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -38,17 +50,17 @@ func GetTask(id int64) (*db.Task, error) {
 }
 
 // AddTask добавляет новую задачу.
-func AddTask(now time.Time, date, title, comment, repeat string) (int64, error) {
+func (s *TaskService) AddTask(now time.Time, date, title, comment, repeat string) (int64, error) {
 	title = trim(title)
 	if title == "" {
 		return 0, ErrTitleRequired
 	}
 
-	today := now.Format(`20060102`)
+	today := now.Format(dateFormat)
 	if date == "" {
 		date = today
 	}
-	if _, err := time.Parse("20060102", date); err != nil {
+	if _, err := time.Parse(dateFormat, date); err != nil {
 		return 0, ErrBadDate
 	}
 	if date < today {
@@ -59,29 +71,24 @@ func AddTask(now time.Time, date, title, comment, repeat string) (int64, error) 
 			return 0, ErrBadRepeat
 		}
 	}
-	res, err := db.Handle().Exec(`INSERT INTO scheduler (date, title, comment, repeat) VALUES (?, ?, ?, ?)`,
-		date, title, comment, repeat)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	return s.store.AddTask(date, title, comment, repeat)
 }
 
 // UpdateTask изменяет существующую задачу.
-func UpdateTask(now time.Time, id int64, date, title, comment, repeat string) error {
+func (s *TaskService) UpdateTask(now time.Time, id int64, date, title, comment, repeat string) error {
 	// Проверим наличие
-	if _, err := GetTask(id); err != nil {
+	if _, err := s.GetTask(id); err != nil {
 		return err
 	}
 	title = trim(title)
 	if title == "" {
 		return ErrTitleRequired
 	}
-	today := now.Format(`20060102`)
+	today := now.Format(dateFormat)
 	if date == "" {
 		date = today
 	}
-	if _, err := time.Parse("20060102", date); err != nil {
+	if _, err := time.Parse(dateFormat, date); err != nil {
 		return ErrBadDate
 	}
 	if date < today {
@@ -92,18 +99,15 @@ func UpdateTask(now time.Time, id int64, date, title, comment, repeat string) er
 			return ErrBadRepeat
 		}
 	}
-	_, err := db.Handle().Exec(`UPDATE scheduler SET date=?, title=?, comment=?, repeat=? WHERE id=?`,
-		date, title, comment, repeat, id)
-	return err
+	return s.store.UpdateTask(id, date, title, comment, repeat)
 }
 
 // DeleteTask удаляет задачу по id.
-func DeleteTask(id int64) error {
-	res, err := db.Handle().Exec(`DELETE FROM scheduler WHERE id=?`, id)
+func (s *TaskService) DeleteTask(id int64) error {
+	n, err := s.store.DeleteTask(id)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
 	}
@@ -111,15 +115,25 @@ func DeleteTask(id int64) error {
 }
 
 // DoneTask помечает задачу выполненной: удаляет, либо переносит дату согласно repeat.
-func DoneTask(id int64) error {
-	t, err := GetTask(id)
+func (s *TaskService) DoneTask(id int64) error {
+	t, err := s.store.GetTask(id)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
 	if trim(t.Repeat) == "" {
-		return DeleteTask(id)
+		n, err := s.store.DeleteTask(id)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	}
-	prevDate, err := time.Parse("20060102", t.Date)
+	prevDate, err := time.Parse(dateFormat, t.Date)
 	if err != nil {
 		return ErrBadDate
 	}
@@ -127,12 +141,9 @@ func DoneTask(id int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Handle().Exec(`UPDATE scheduler SET date=? WHERE id=?`, next, id)
-	return err
+	return s.store.UpdateTaskDate(id, next)
 }
 
 func trim(s string) string {
 	return strings.TrimSpace(s)
 }
-
-

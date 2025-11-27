@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const dateFormat = "20060102"
+
 var (
 	ErrEmptyRepeat   = errors.New("repeat: пустая строка")
 	ErrBadStartDate  = errors.New("dstart: некорректная дата")
@@ -25,7 +27,7 @@ func NextDate(now time.Time, dstart string, repeat string) (string, error) {
 	if repeat == "" {
 		return "", ErrEmptyRepeat
 	}
-	start, err := time.Parse("20060102", strings.TrimSpace(dstart))
+	start, err := time.Parse(dateFormat, strings.TrimSpace(dstart))
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrBadStartDate, err)
 	}
@@ -48,7 +50,7 @@ func NextDate(now time.Time, dstart string, repeat string) (string, error) {
 		for !afterNow(next, now) {
 			next = addOneYearKeepOverflow(next)
 		}
-		return next.Format("20060102"), nil
+		return next.Format(dateFormat), nil
 
 	case "d":
 		if len(parts) != 2 {
@@ -64,7 +66,7 @@ func NextDate(now time.Time, dstart string, repeat string) (string, error) {
 		for !afterNow(next, now) {
 			next = next.AddDate(0, 0, interval)
 		}
-		return next.Format("20060102"), nil
+		return next.Format(dateFormat), nil
 
 	case "w":
 		// Формат: w <через запятую из 1..7>
@@ -80,7 +82,7 @@ func NextDate(now time.Time, dstart string, repeat string) (string, error) {
 		for !afterNow(next, now) {
 			next = nextWeeklyAfter(next, weekdays)
 		}
-		return next.Format("20060102"), nil
+		return next.Format(dateFormat), nil
 
 	case "m":
 		// Формат: m <дни> [месяцы]
@@ -104,7 +106,7 @@ func NextDate(now time.Time, dstart string, repeat string) (string, error) {
 		for !afterNow(next, now) {
 			next = nextMonthlyAfter(next, monthDays, monthsAllowed)
 		}
-		return next.Format("20060102"), nil
+		return next.Format(dateFormat), nil
 	default:
 		return "", ErrUnsupported
 	}
@@ -291,5 +293,3 @@ func lastDayOfMonth(year int, month time.Month, loc *time.Location) time.Time {
 	// День 0 следующего месяца — это последний день текущего месяца
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, loc)
 }
-
-
